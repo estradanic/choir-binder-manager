@@ -13,7 +13,7 @@ A Rust-based terminal user interface for tracking choir binders and their sheet 
 cargo run
 ```
 
-The application creates a local SQLite database at `data/binders.sqlite` on first launch and seeds 20 binders numbered 1 through 20. Use the arrow keys to navigate the grid and press `q` or `Esc` to exit.
+The application creates a local SQLite database at `~/.choir-binder-manager/binders.sqlite` on first launch. Use the arrow keys to navigate the grid and press `q` or `Esc` to exit.
 
 ## Project Layout
 

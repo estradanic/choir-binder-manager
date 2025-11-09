@@ -11,7 +11,7 @@ pub mod ui;
 /// Convenience re-exports for the persistence layer. These functions are
 /// typically used by `main.rs` to initialize the embedded SQLite store and
 /// preload data.
-pub use db::{ensure_schema, fetch_composers, load_or_seed_binders};
+pub use db::{ensure_schema, fetch_composers, fetch_binders};
 
 /// The two primary domain types that other layers manipulate.
 pub use models::{Binder, Song};

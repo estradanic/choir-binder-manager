@@ -5,28 +5,37 @@
 //! the project.
 
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
+use directories::BaseDirs;
 use rusqlite::{params, Connection, Error as SqlError, ErrorCode};
 
 use crate::models::{Binder, Song};
 
-/// Location of the on-disk SQLite database relative to the project root. We
-/// keep it as a constant because several code paths (schema creation, tests,
-/// and manual migrations) rely on the exact same string.
-const DB_PATH: &str = "data/binders.sqlite";
+/// Folder name used beneath the user's home directory for application data.
+const DATA_DIR_NAME: &str = ".choir-binder-manager";
+/// SQLite file name stored inside the application data directory.
+const DB_FILE_NAME: &str = "binders.sqlite";
+
+/// Resolve the absolute path to the SQLite database inside the user's home.
+fn db_path() -> Result<PathBuf> {
+    let base_dirs = BaseDirs::new().ok_or_else(|| anyhow!("could not locate home directory"))?;
+    Ok(base_dirs.home_dir().join(DATA_DIR_NAME).join(DB_FILE_NAME))
+}
 
 /// Ensure the database file exists, run lazy migrations, and return a live
 /// connection. The function also toggles `PRAGMA foreign_keys = ON` so the
 /// referential integrity checks in our schema behave the same during tests and
 /// production runs.
 pub fn ensure_schema() -> Result<Connection> {
-    if let Some(parent) = Path::new(DB_PATH).parent() {
+    let db_path = db_path()?;
+
+    if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent).context("failed to create data directory")?;
     }
 
-    let conn = Connection::open(DB_PATH).context("failed to open SQLite database")?;
+    let conn = Connection::open(&db_path).context("failed to open SQLite database")?;
     conn.execute("PRAGMA foreign_keys = ON", [])
         .context("failed to enable foreign keys")?;
 
@@ -64,14 +73,6 @@ pub fn ensure_schema() -> Result<Connection> {
     .context("failed to create binder_songs table")?;
 
     Ok(conn)
-}
-
-/// Load existing binders or seed the default set if the database is empty. The
-/// seeding logic currently lives inside `fetch_binders` (which returns an empty
-/// list when nothing exists) so this wrapper stays small, but keeping a named
-/// function makes the startup flow in `main.rs` easier to read.
-pub fn load_or_seed_binders(conn: &Connection) -> Result<Vec<Binder>> {
-    fetch_binders(conn)
 }
 
 /// Retrieve every binder sorted numerically. The query doubles as the single

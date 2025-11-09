@@ -17,8 +17,7 @@ pub struct Binder {
     /// Human-assigned binder number. We preserve it as an integer so ordering is
     /// numeric instead of lexicographic (Binder 2 comes before Binder 10).
     pub number: i64,
-    /// User-facing display label. This might be empty for freshly seeded
-    /// binders but remains customizable.
+    /// User-facing display label.
     pub label: String,
 }
 
