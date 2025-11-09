@@ -2,7 +2,7 @@
 //! Summarizing the bootstrapping pipeline here keeps the intent obvious when
 //! revisiting the code: we bring up the database, hydrate the initial app
 //! state, and drive the Ratatui event loop until the user exits.
-use choir_binder_manager::{ensure_schema, fetch_composers, fetch_binders, run_app, App};
+use choir_binder_manager::{ensure_schema, fetch_binders, fetch_composers, run_app, App};
 
 /// Initialize persistence, load cached data, and launch the Ratatui event loop.
 ///

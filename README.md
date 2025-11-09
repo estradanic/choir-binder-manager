@@ -15,6 +15,13 @@ cargo run
 
 The application creates a local SQLite database at `~/.choir-binder-manager/binders.sqlite` on first launch. Use the arrow keys to navigate the grid and press `q` or `Esc` to exit.
 
+Keyboard notes:
+
+- Press `f` while viewing a song list (either inside a binder or the global Song Manager) to open an inline search bar at the top of the screen.
+- Type to filter by song title or composer (case-insensitive substring match). Use Up/Down to navigate the filtered results.
+- Press `Esc` to exit the search and clear the filter.
+- In the Song Manager, press `l` to toggle showing only songs without links. The shortcut also works with `Ctrl+L` while the search bar is open.
+
 ## Project Layout
 
 - `src/db.rs` – SQLite setup and data-loading utilities

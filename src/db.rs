@@ -130,7 +130,7 @@ pub fn update_binder(conn: &Connection, id: i64, number: i64, label: &str) -> Re
     if updated == 0 {
         Err(anyhow!("Binder not found"))
     } else {
-    Ok(())
+        Ok(())
     }
 }
 
@@ -144,7 +144,7 @@ pub fn delete_binder(conn: &Connection, id: i64) -> Result<()> {
     if deleted == 0 {
         Err(anyhow!("Binder not found"))
     } else {
-    Ok(())
+        Ok(())
     }
 }
 
@@ -158,7 +158,7 @@ fn map_unique_constraint(err: SqlError, number: i64) -> anyhow::Error {
     ) {
         anyhow!("Binder number {number} already exists.")
     } else {
-    err.into()
+        err.into()
     }
 }
 
@@ -308,7 +308,7 @@ pub fn update_song(
     if updated == 0 {
         Err(anyhow!("Song not found"))
     } else {
-    Ok(())
+        Ok(())
     }
 }
 
@@ -337,7 +337,7 @@ pub fn remove_song_from_binder(conn: &Connection, binder_id: i64, song_id: i64) 
     if deleted == 0 {
         Err(anyhow!("Song not linked to this binder"))
     } else {
-    Ok(())
+        Ok(())
     }
 }
 

@@ -11,7 +11,7 @@ use std::mem;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -137,7 +137,10 @@ fn build_binder_cover_lines(
 
     if pattern_rows == 0 {
         for _ in 0..pattern_height {
-            lines.push(Line::from(vec![Span::styled(" ".repeat(width), pattern_style)]));
+            lines.push(Line::from(vec![Span::styled(
+                " ".repeat(width),
+                pattern_style,
+            )]));
         }
     } else {
         for row_idx in 0..pattern_height {
@@ -165,7 +168,10 @@ fn build_binder_cover_lines(
     }
 
     while lines.len() < height {
-        lines.push(Line::from(vec![Span::styled(" ".repeat(width), pattern_style)]));
+        lines.push(Line::from(vec![Span::styled(
+            " ".repeat(width),
+            pattern_style,
+        )]));
     }
 
     lines
@@ -203,6 +209,21 @@ enum Mode {
         form: SongForm,
     },
     ConfirmToPrintExit(ConfirmToPrintExit),
+    /// Search mode: typing updates the query and filters the current song list
+    Searching(SearchState),
+}
+
+/// Which screen the search is targeting.
+enum SearchTarget {
+    Songs,
+    SongManager,
+}
+
+/// State for an active inline search. `query` is the current text shown in
+/// the search bar. `target` selects which list will be filtered.
+struct SearchState {
+    target: SearchTarget,
+    query: String,
 }
 
 /// Central application state shared across the TUI. The struct combines the
@@ -224,6 +245,9 @@ pub struct App {
     mode: Mode,
     /// Optional status line surfaced in the footer.
     status: Option<StatusMessage>,
+    /// When a search is interrupted by opening a modal (edit), we stash the
+    /// SearchState here so it can be restored after the modal closes.
+    saved_search: Option<SearchState>,
 }
 
 impl App {
@@ -239,6 +263,7 @@ impl App {
             screen: Screen::Binders,
             mode: Mode::Normal,
             status: None,
+            saved_search: None,
         }
     }
 
@@ -266,6 +291,7 @@ impl App {
             Mode::ConfirmToPrintExit(confirm) => {
                 self.handle_confirm_to_print_exit(code, confirm, &mut exit)?
             }
+            Mode::Searching(state) => self.handle_search(code, state)?,
         };
 
         self.mode = mode;
@@ -355,6 +381,12 @@ impl App {
                         KeyCode::PageDown => songs.move_selection(5),
                         KeyCode::Home => songs.select_first(),
                         KeyCode::End => songs.select_last(),
+                        KeyCode::Char('f') => {
+                            return Ok(Mode::Searching(SearchState {
+                                target: SearchTarget::Songs,
+                                query: String::new(),
+                            }));
+                        }
                         KeyCode::Char('s') | KeyCode::Char('S') => {
                             open_manager = true;
                         }
@@ -454,6 +486,7 @@ impl App {
                 let mut status_to_set: Option<(String, StatusKind)> = None;
                 let mut return_to_binders = false;
                 let mut open_to_print = false;
+                let mut toggled_no_link: Option<bool> = None;
 
                 {
                     let manager = &mut *manager;
@@ -463,6 +496,12 @@ impl App {
                         }
                         KeyCode::Esc | KeyCode::Char('s') | KeyCode::Char('S') => {
                             return_to_binders = true;
+                        }
+                        KeyCode::Char('f') => {
+                            return Ok(Mode::Searching(SearchState {
+                                target: SearchTarget::SongManager,
+                                query: String::new(),
+                            }));
                         }
                         KeyCode::Up => manager.move_selection(-1),
                         KeyCode::Down => manager.move_selection(1),
@@ -524,6 +563,9 @@ impl App {
                         KeyCode::Char('p') | KeyCode::Char('P') => {
                             open_to_print = true;
                         }
+                        KeyCode::Char('l') | KeyCode::Char('L') => {
+                            toggled_no_link = Some(manager.toggle_show_no_link());
+                        }
                         _ => {}
                     }
                 }
@@ -533,6 +575,13 @@ impl App {
                     self.screen = Screen::Binders;
                 } else if open_to_print {
                     self.open_to_print_view()?;
+                } else if let Some(active) = toggled_no_link {
+                    let message = if active {
+                        "Showing songs without links.".to_string()
+                    } else {
+                        "Showing all songs.".to_string()
+                    };
+                    self.set_status(message, StatusKind::Info);
                 } else if let Some((text, kind)) = status_to_set {
                     self.set_status(text, kind);
                 }
@@ -733,7 +782,13 @@ impl App {
         if keep_open {
             Ok(Mode::EditingSong { song_id, form })
         } else {
-            Ok(Mode::Normal)
+            // If we stashed a search state before opening the modal, restore
+            // it so the search remains active underneath the edit form.
+            if let Some(state) = self.saved_search.take() {
+                Ok(Mode::Searching(state))
+            } else {
+                Ok(Mode::Normal)
+            }
         }
     }
 
@@ -845,6 +900,230 @@ impl App {
             },
             _ => Ok(Mode::SelectingSong(state)),
         }
+    }
+
+    /// Handle keys while an inline search is active. The search overlays the
+    /// current song list and updates the filter as the user types. Esc clears
+    /// the filter and exits the search, while navigation and Enter retain the
+    /// normal song-list behavior against the filtered results.
+    fn handle_search(&mut self, code: KeyCode, mut state: SearchState) -> Result<Mode> {
+        match state.target {
+            SearchTarget::SongManager => {
+                // Ensure we're looking at the song manager; otherwise abort.
+                let manager = match &mut self.screen {
+                    Screen::SongManager(m) => m,
+                    _ => return Ok(Mode::Normal),
+                };
+
+                match code {
+                    KeyCode::Esc => {
+                        manager.set_filter(None);
+                        return Ok(Mode::Normal);
+                    }
+                    KeyCode::Up => {
+                        manager.move_selection(-1);
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::Down => {
+                        manager.move_selection(1);
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::PageUp => {
+                        manager.move_selection(-5);
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::PageDown => {
+                        manager.move_selection(5);
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::Home => {
+                        manager.select_first();
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::End => {
+                        manager.select_last();
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::Enter => {
+                        if let Some(song) = manager.current_song().cloned() {
+                            let link = song.link.trim().to_string();
+                            if link.is_empty() {
+                                self.set_status(
+                                    "This song does not have a link.",
+                                    StatusKind::Error,
+                                );
+                            } else if let Err(err) = open_link(&link) {
+                                self.set_status(
+                                    format!("Failed to open link: {err}"),
+                                    StatusKind::Error,
+                                );
+                            } else {
+                                self.set_status(
+                                    format!("Opened {}.", song.display_title()),
+                                    StatusKind::Info,
+                                );
+                            }
+                        }
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::Backspace => {
+                        state.query.pop();
+                    }
+                    KeyCode::Char(ch) => {
+                        if ch.is_control() {
+                            // Interpret Ctrl+E as Edit (0x05). Other controls are ignored
+                            match ch {
+                                '\u{5}' => {
+                                    if let Some(song) = manager.current_song().cloned() {
+                                        return Ok(Mode::EditingSong {
+                                            song_id: song.id,
+                                            form: SongForm::from_song(&song),
+                                        });
+                                    } else {
+                                        self.set_status(
+                                            "No song selected to edit.",
+                                            StatusKind::Error,
+                                        );
+                                        return Ok(Mode::Searching(state));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            state.query.push(ch);
+                        }
+                    }
+                    _ => {}
+                }
+
+                if state.query.trim().is_empty() {
+                    manager.set_filter(None);
+                } else {
+                    manager.set_filter(Some(state.query.clone()));
+                }
+
+                Ok(Mode::Searching(state))
+            }
+            SearchTarget::Songs => {
+                let songs = match &mut self.screen {
+                    Screen::Songs(s) => s,
+                    _ => return Ok(Mode::Normal),
+                };
+
+                match code {
+                    KeyCode::Esc => {
+                        songs.set_filter(None);
+                        return Ok(Mode::Normal);
+                    }
+                    KeyCode::Up => {
+                        songs.move_selection(-1);
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::Down => {
+                        songs.move_selection(1);
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::PageUp => {
+                        songs.move_selection(-5);
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::PageDown => {
+                        songs.move_selection(5);
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::Home => {
+                        songs.select_first();
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::End => {
+                        songs.select_last();
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::Enter => {
+                        if let Some(song) = songs.current_song().cloned() {
+                            let link = song.link.trim().to_string();
+                            if link.is_empty() {
+                                self.set_status(
+                                    "This song does not have a link.",
+                                    StatusKind::Error,
+                                );
+                            } else if let Err(err) = open_link(&link) {
+                                self.set_status(
+                                    format!("Failed to open link: {err}"),
+                                    StatusKind::Error,
+                                );
+                            } else {
+                                self.set_status(
+                                    format!("Opened {}.", song.display_title()),
+                                    StatusKind::Info,
+                                );
+                            }
+                        }
+                        return Ok(Mode::Searching(state));
+                    }
+                    KeyCode::Backspace => {
+                        state.query.pop();
+                    }
+                    KeyCode::Char(ch) => {
+                        if ch.is_control() {
+                            // Ctrl+E -> Edit current song in binder view
+                            match ch {
+                                '\u{5}' => {
+                                    if let Some(song) = songs.current_song().cloned() {
+                                        return Ok(Mode::EditingSong {
+                                            song_id: song.id,
+                                            form: SongForm::from_song(&song),
+                                        });
+                                    } else {
+                                        self.set_status(
+                                            "No song selected to edit.",
+                                            StatusKind::Error,
+                                        );
+                                        return Ok(Mode::Searching(state));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            state.query.push(ch);
+                        }
+                    }
+                    _ => {}
+                }
+
+                if state.query.trim().is_empty() {
+                    songs.set_filter(None);
+                } else {
+                    songs.set_filter(Some(state.query.clone()));
+                }
+
+                Ok(Mode::Searching(state))
+            }
+        }
+    }
+
+    /// Draw a small search bar at the top of the provided `area` showing the
+    /// current query and placing the cursor at the end of the typed text.
+    fn draw_search_bar(&self, frame: &mut Frame, area: Rect, state: &SearchState) {
+        let height = 3u16.min(area.height);
+        let popup_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height,
+        };
+        frame.render_widget(Clear, popup_area);
+
+        let block = Block::default().borders(Borders::ALL).title("Search");
+        let paragraph = Paragraph::new(Span::raw(format!("Search: {}", state.query)))
+            .block(block.clone())
+            .wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, popup_area);
+
+        let inner = block.inner(popup_area);
+        let cursor_x = inner.x + "Search: ".len() as u16 + state.query.chars().count() as u16;
+        let cursor_y = inner.y;
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 
     /// Create-song form handler that optionally links the song to a binder
@@ -1303,8 +1582,67 @@ impl App {
             Mode::ConfirmToPrintExit(confirm) => {
                 self.draw_confirm_to_print_exit(frame, area, confirm)
             }
+            Mode::Searching(state) => self.draw_search_bar(frame, area, state),
             Mode::Normal => {}
         }
+    }
+
+    /// Called from the event loop when Ctrl+E is pressed so we can escape
+    /// the search box and open the edit form for the current song.
+    fn handle_ctrl_e(&mut self) -> Result<()> {
+        // Only act when the search overlay is active.
+        if !matches!(self.mode, Mode::Searching(_)) {
+            return Ok(());
+        }
+
+        // Extract and stash the active SearchState so it can be restored after
+        // the edit modal closes.
+        let previous = mem::replace(&mut self.mode, Mode::Normal);
+        if let Mode::Searching(state) = previous {
+            self.saved_search = Some(state);
+        }
+
+        // Open the edit modal for the currently-selected song, if any.
+        match &mut self.screen {
+            Screen::SongManager(manager) => {
+                if let Some(song) = manager.current_song().cloned() {
+                    self.mode = Mode::EditingSong {
+                        song_id: song.id,
+                        form: SongForm::from_song(&song),
+                    };
+                } else {
+                    self.set_status("No song selected to edit.", StatusKind::Error);
+                }
+            }
+            Screen::Songs(songs) => {
+                if let Some(song) = songs.current_song().cloned() {
+                    self.mode = Mode::EditingSong {
+                        song_id: song.id,
+                        form: SongForm::from_song(&song),
+                    };
+                } else {
+                    self.set_status("No song selected to edit.", StatusKind::Error);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Toggle the "show only songs without links" filter in the song manager,
+    /// preserving any active search query.
+    fn handle_ctrl_l(&mut self) -> Result<()> {
+        if let Screen::SongManager(manager) = &mut self.screen {
+            let active = manager.toggle_show_no_link();
+            let message = if active {
+                "Showing songs without links.".to_string()
+            } else {
+                "Showing all songs.".to_string()
+            };
+            self.set_status(message, StatusKind::Info);
+        }
+        Ok(())
     }
 
     /// Render the binder overview grid with decorative covers and selection
@@ -1330,19 +1668,19 @@ impl App {
                     if binder_index == self.selected {
                         block = block.style(Style::default().fg(Color::Yellow));
                     }
-                        let pattern = BINDER_ART[binder_index % BINDER_ART.len()];
-                        let inner_width = column_chunk.width.saturating_sub(2);
-                        let inner_height = column_chunk.height.saturating_sub(2);
-                        let lines = build_binder_cover_lines(
-                            binder,
-                            pattern,
-                            inner_width,
-                            inner_height,
-                            binder_index == self.selected,
-                        );
-                        let card = Paragraph::new(lines)
-                            .alignment(Alignment::Left)
-                            .block(block);
+                    let pattern = BINDER_ART[binder_index % BINDER_ART.len()];
+                    let inner_width = column_chunk.width.saturating_sub(2);
+                    let inner_height = column_chunk.height.saturating_sub(2);
+                    let lines = build_binder_cover_lines(
+                        binder,
+                        pattern,
+                        inner_width,
+                        inner_height,
+                        binder_index == self.selected,
+                    );
+                    let card = Paragraph::new(lines)
+                        .alignment(Alignment::Left)
+                        .block(block);
                     frame.render_widget(card, column_chunk);
                 }
             }
@@ -1379,20 +1717,81 @@ impl App {
             return;
         }
 
-        self.render_song_cards(frame, chunks[1], &songs.songs, songs.selected);
+        self.render_song_cards(frame, chunks[1], &songs.filtered_songs, songs.selected);
     }
 
     /// Render the global song manager list when accessed from the home screen.
     fn draw_song_manager(&self, frame: &mut Frame, area: Rect, manager: &SongManagerScreen) {
+        let mut list_area = area;
+
+        if manager.show_only_no_link {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(4), Constraint::Min(1)])
+                .split(area);
+            let indicator = Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Song Manager",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(vec![
+                    Span::styled(
+                        "No-link filter active",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" - showing only songs without links (press "),
+                    Span::styled(
+                        "[l]",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" to show all)"),
+                ]),
+            ])
+            .block(Block::default().borders(Borders::ALL))
+            .alignment(Alignment::Left);
+            frame.render_widget(indicator, chunks[0]);
+            list_area = chunks[1];
+        }
+
+        if list_area.height == 0 {
+            return;
+        }
+
         if manager.songs.is_empty() {
             let message = Paragraph::new("No songs yet. Press '+' to add one.")
                 .alignment(Alignment::Center)
                 .block(Block::default().borders(Borders::ALL).title("All Songs"));
-            frame.render_widget(message, area);
+            frame.render_widget(message, list_area);
             return;
         }
 
-        self.render_song_cards(frame, area, &manager.songs, manager.selected);
+        if manager.filtered_songs.is_empty() {
+            let has_search = manager
+                .filter
+                .as_ref()
+                .map(|q| !q.trim().is_empty())
+                .unwrap_or(false);
+            let message_text = if manager.show_only_no_link && has_search {
+                "No songs match the current search without links."
+            } else if manager.show_only_no_link {
+                "No songs without links yet."
+            } else if has_search {
+                "No songs match the current search."
+            } else {
+                "No songs to display."
+            };
+            let message = Paragraph::new(message_text)
+                .alignment(Alignment::Center)
+                .block(Block::default().borders(Borders::ALL).title("All Songs"));
+            frame.render_widget(message, list_area);
+            return;
+        }
+
+        self.render_song_cards(frame, list_area, &manager.filtered_songs, manager.selected);
     }
 
     /// Render the printable report view, showing either binder-by-binder needs
@@ -1490,6 +1889,10 @@ impl App {
                 Span::raw(" Select   "),
                 Span::styled("[Enter]", key_style),
                 Span::raw(" Open Link   "),
+                Span::styled("[f]", key_style),
+                Span::raw(" Search   "),
+                Span::styled("[l]", key_style),
+                Span::raw(" Toggle No-Link   "),
                 Span::styled("[+]", key_style),
                 Span::raw(" Add   "),
                 Span::styled("[-]", key_style),
@@ -1508,6 +1911,8 @@ impl App {
                 Span::raw(" Select   "),
                 Span::styled("[Enter]", key_style),
                 Span::raw(" Open Link   "),
+                Span::styled("[f]", key_style),
+                Span::raw(" Search   "),
                 Span::styled("[+]", key_style),
                 Span::raw(" Add   "),
                 Span::styled("[-]", key_style),
@@ -1965,6 +2370,22 @@ pub fn run_app(app: &mut App) -> Result<()> {
         if event::poll(Duration::from_millis(250)).context("event polling failed")? {
             if let Event::Key(key_event) = event::read().context("failed to read event")? {
                 if key_event.kind == KeyEventKind::Press {
+                    // Intercept Ctrl+E while searching and route to a dedicated
+                    // handler so the control is not treated as a printable char.
+                    if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                        match key_event.code {
+                            KeyCode::Char('e') => {
+                                app.handle_ctrl_e()?;
+                                continue;
+                            }
+                            KeyCode::Char('l') => {
+                                app.handle_ctrl_l()?;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
                     if app.handle_key(key_event.code)? {
                         break Ok(());
                     }
@@ -2486,7 +2907,16 @@ impl StatusKind {
 
 /// Wrapper around the global song list used by the manager screen.
 struct SongManagerScreen {
+    /// Full backing song list.
     songs: Vec<Song>,
+    /// Currently visible (filtered) songs. When no filter is active this is
+    /// a clone of `songs`.
+    filtered_songs: Vec<Song>,
+    /// Optional active filter string.
+    filter: Option<String>,
+    /// If true, only show songs that do not have a link.
+    show_only_no_link: bool,
+    /// Selected index into `filtered_songs`.
     selected: usize,
 }
 
@@ -2494,22 +2924,81 @@ impl SongManagerScreen {
     /// Construct the screen and clamp the selection if the incoming list is
     /// empty.
     fn new(songs: Vec<Song>) -> Self {
-        let mut screen = Self { songs, selected: 0 };
+        let mut screen = Self {
+            filtered_songs: Vec::new(),
+            songs,
+            filter: None,
+            show_only_no_link: false,
+            selected: 0,
+        };
+        screen.apply_filter();
         screen.ensure_in_bounds();
         screen
     }
 
-    /// Return the currently highlighted song, if any.
-    fn current_song(&self) -> Option<&Song> {
-        self.songs.get(self.selected)
+    /// Apply the active filter (or clear it) to produce `filtered_songs`.
+    fn apply_filter(&mut self) {
+        // Start from the full song list and apply the search query if present.
+        let base: Vec<Song> = if let Some(q) = &self.filter {
+            let ql = q.to_lowercase();
+            if ql.trim().is_empty() {
+                self.songs.clone()
+            } else {
+                self.songs
+                    .iter()
+                    .filter(|s| {
+                        s.title.to_lowercase().contains(&ql)
+                            || s.composer.to_lowercase().contains(&ql)
+                    })
+                    .cloned()
+                    .collect()
+            }
+        } else {
+            self.songs.clone()
+        };
+
+        // Apply the "no link" filter when enabled.
+        if self.show_only_no_link {
+            self.filtered_songs = base
+                .into_iter()
+                .filter(|s| s.link.trim().is_empty())
+                .collect();
+        } else {
+            self.filtered_songs = base;
+        }
+
+        if self.filtered_songs.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.filtered_songs.len() {
+            self.selected = self.filtered_songs.len() - 1;
+        }
     }
 
-    /// Move selection by `offset`, clamping to the valid range.
+    /// Set or clear the filter string and recompute the visible list.
+    fn set_filter(&mut self, filter: Option<String>) {
+        self.filter = filter;
+        self.apply_filter();
+    }
+
+    /// Toggle whether only songs without links should be visible.
+    fn toggle_show_no_link(&mut self) -> bool {
+        self.show_only_no_link = !self.show_only_no_link;
+        self.apply_filter();
+        self.show_only_no_link
+    }
+
+    /// Return the currently highlighted song, if any.
+    fn current_song(&self) -> Option<&Song> {
+        self.filtered_songs.get(self.selected)
+    }
+
+    /// Move selection by `offset`, clamping to the valid range of the
+    /// filtered list.
     fn move_selection(&mut self, offset: isize) {
-        if self.songs.is_empty() {
+        if self.filtered_songs.is_empty() {
             return;
         }
-        let len = self.songs.len() as isize;
+        let len = self.filtered_songs.len() as isize;
         let mut new = self.selected as isize + offset;
         if new < 0 {
             new = 0;
@@ -2522,30 +3011,30 @@ impl SongManagerScreen {
 
     /// Jump to the first entry.
     fn select_first(&mut self) {
-        if !self.songs.is_empty() {
+        if !self.filtered_songs.is_empty() {
             self.selected = 0;
         }
     }
 
     /// Jump to the last entry.
     fn select_last(&mut self) {
-        if !self.songs.is_empty() {
-            self.selected = self.songs.len() - 1;
+        if !self.filtered_songs.is_empty() {
+            self.selected = self.filtered_songs.len() - 1;
         }
     }
 
-    /// Replace the backing song list.
+    /// Replace the backing song list and recompute any active filter.
     fn set_songs(&mut self, songs: Vec<Song>) {
         self.songs = songs;
-        self.ensure_in_bounds();
+        self.apply_filter();
     }
 
-    /// Keep the selection index within the list bounds.
+    /// Keep the selection index within the filtered list bounds.
     fn ensure_in_bounds(&mut self) {
-        if self.songs.is_empty() {
+        if self.filtered_songs.is_empty() {
             self.selected = 0;
-        } else if self.selected >= self.songs.len() {
-            self.selected = self.songs.len() - 1;
+        } else if self.selected >= self.filtered_songs.len() {
+            self.selected = self.filtered_songs.len() - 1;
         }
     }
 }
@@ -2927,7 +3416,13 @@ struct SongNeeded {
 /// Backing state for the binder-specific song view.
 struct SongScreen {
     binder: Binder,
+    /// Full backing song list for this binder.
     songs: Vec<Song>,
+    /// Filtered view derived from `songs` when a search query is active.
+    filtered_songs: Vec<Song>,
+    /// Optional active filter string.
+    filter: Option<String>,
+    /// Selected index into `filtered_songs`.
     selected: usize,
 }
 
@@ -2937,10 +3432,47 @@ impl SongScreen {
         let mut screen = Self {
             binder,
             songs,
+            filtered_songs: Vec::new(),
+            filter: None,
             selected: 0,
         };
+        screen.apply_filter();
         screen.ensure_in_bounds();
         screen
+    }
+
+    /// Apply the active filter to produce the `filtered_songs` list.
+    fn apply_filter(&mut self) {
+        if let Some(q) = &self.filter {
+            let ql = q.to_lowercase();
+            if ql.trim().is_empty() {
+                self.filtered_songs = self.songs.clone();
+            } else {
+                self.filtered_songs = self
+                    .songs
+                    .iter()
+                    .filter(|s| {
+                        s.title.to_lowercase().contains(&ql)
+                            || s.composer.to_lowercase().contains(&ql)
+                    })
+                    .cloned()
+                    .collect();
+            }
+        } else {
+            self.filtered_songs = self.songs.clone();
+        }
+
+        if self.filtered_songs.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.filtered_songs.len() {
+            self.selected = self.filtered_songs.len() - 1;
+        }
+    }
+
+    /// Set or clear the filter and recompute the visible list.
+    fn set_filter(&mut self, filter: Option<String>) {
+        self.filter = filter;
+        self.apply_filter();
     }
 
     /// Convenience accessor for the binder id.
@@ -2948,17 +3480,17 @@ impl SongScreen {
         Some(self.binder.id)
     }
 
-    /// Current song selection, if the list is not empty.
+    /// Current song selection from the filtered list, if any.
     fn current_song(&self) -> Option<&Song> {
-        self.songs.get(self.selected)
+        self.filtered_songs.get(self.selected)
     }
 
-    /// Move the selection within the binder's song list.
+    /// Move the selection within the binder's filtered song list.
     fn move_selection(&mut self, offset: isize) {
-        if self.songs.is_empty() {
+        if self.filtered_songs.is_empty() {
             return;
         }
-        let len = self.songs.len() as isize;
+        let len = self.filtered_songs.len() as isize;
         let mut new = self.selected as isize + offset;
         if new < 0 {
             new = 0;
@@ -2971,30 +3503,30 @@ impl SongScreen {
 
     /// Jump to the first song.
     fn select_first(&mut self) {
-        if !self.songs.is_empty() {
+        if !self.filtered_songs.is_empty() {
             self.selected = 0;
         }
     }
 
     /// Jump to the last song.
     fn select_last(&mut self) {
-        if !self.songs.is_empty() {
-            self.selected = self.songs.len() - 1;
+        if !self.filtered_songs.is_empty() {
+            self.selected = self.filtered_songs.len() - 1;
         }
     }
 
     /// Replace the song list and clamp the selection.
     fn set_songs(&mut self, songs: Vec<Song>) {
         self.songs = songs;
-        self.ensure_in_bounds();
+        self.apply_filter();
     }
 
-    /// Clamp the selection index to a valid song.
+    /// Clamp the selection index to a valid song in the filtered list.
     fn ensure_in_bounds(&mut self) {
-        if self.songs.is_empty() {
+        if self.filtered_songs.is_empty() {
             self.selected = 0;
-        } else if self.selected >= self.songs.len() {
-            self.selected = self.songs.len() - 1;
+        } else if self.selected >= self.filtered_songs.len() {
+            self.selected = self.filtered_songs.len() - 1;
         }
     }
 }
