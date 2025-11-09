@@ -30,6 +30,4 @@ Keyboard notes:
 
 ## Next Steps
 
-- Add views for individual binders and song lists
-- Implement CRUD operations for songs and binder assignments
 - Integrate search and filtering capabilities
