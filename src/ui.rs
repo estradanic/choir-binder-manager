@@ -1263,7 +1263,7 @@ impl App {
     /// Main render routine invoked each tick by Ratatui. Splits the frame into
     /// content and footer regions and dispatches to the active screen.
     fn draw(&self, frame: &mut Frame) {
-        let area = frame.size();
+        let area = frame.area();
         let footer_height = FOOTER_HEIGHT.min(area.height);
 
         let (content_area, footer_area) = if area.height > footer_height {
@@ -1590,7 +1590,7 @@ impl App {
                 )
             }
         };
-        frame.set_cursor(cursor_x, cursor_y);
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 
     /// Render the add/edit song dialog, including autocomplete hints for the
@@ -1647,7 +1647,7 @@ impl App {
                 )
             }
         };
-        frame.set_cursor(cursor_x, cursor_y);
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 
     /// Render the binder deletion confirmation popup.
