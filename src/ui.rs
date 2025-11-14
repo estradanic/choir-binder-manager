@@ -880,24 +880,62 @@ impl App {
                 state.select_last();
                 Ok(Mode::SelectingSong(state))
             }
-            KeyCode::Enter => match state.current_item() {
-                Some(AddSongItem::CreateNew) => Ok(Mode::CreatingSong {
-                    binder_id: Some(state.binder_id),
-                    form: SongForm::default(),
-                }),
-                Some(AddSongItem::Existing(song)) => {
-                    if let Err(err) = add_song_to_binder(&self.conn, state.binder_id, song.id) {
-                        let message = surface_error(&err);
-                        self.set_status(message, StatusKind::Error);
-                        Ok(Mode::SelectingSong(state))
-                    } else {
+            KeyCode::Char(' ') => {
+                state.toggle_current_selection();
+                Ok(Mode::SelectingSong(state))
+            }
+            KeyCode::Enter => {
+                let selections = state.checked_songs();
+                if !selections.is_empty() {
+                    let mut added = 0usize;
+                    for song in selections {
+                        if let Err(err) = add_song_to_binder(&self.conn, state.binder_id, song.id) {
+                            let message = surface_error(&err);
+                            self.set_status(message, StatusKind::Error);
+                            if added > 0 {
+                                self.refresh_song_screen()?;
+                                return Ok(Mode::Normal);
+                            } else {
+                                return Ok(Mode::SelectingSong(state));
+                            }
+                        }
+                        added += 1;
+                    }
+
+                    if added > 0 {
                         self.refresh_song_screen()?;
-                        self.set_status("Song added to binder.", StatusKind::Info);
-                        Ok(Mode::Normal)
+                        let message = if added == 1 {
+                            "Song added to binder.".to_string()
+                        } else {
+                            format!("Added {added} songs to binder.")
+                        };
+                        self.set_status(message, StatusKind::Info);
+                    }
+
+                    Ok(Mode::Normal)
+                } else {
+                    match state.current_item() {
+                        Some(AddSongItem::CreateNew) => Ok(Mode::CreatingSong {
+                            binder_id: Some(state.binder_id),
+                            form: SongForm::default(),
+                        }),
+                        Some(AddSongItem::Existing(song)) => {
+                            if let Err(err) =
+                                add_song_to_binder(&self.conn, state.binder_id, song.id)
+                            {
+                                let message = surface_error(&err);
+                                self.set_status(message, StatusKind::Error);
+                                Ok(Mode::SelectingSong(state))
+                            } else {
+                                self.refresh_song_screen()?;
+                                self.set_status("Song added to binder.", StatusKind::Info);
+                                Ok(Mode::Normal)
+                            }
+                        }
+                        None => Ok(Mode::Normal),
                     }
                 }
-                None => Ok(Mode::Normal),
-            },
+            }
             _ => Ok(Mode::SelectingSong(state)),
         }
     }
@@ -1854,8 +1892,10 @@ impl App {
             (_, Mode::SelectingSong(_)) => Line::from(vec![
                 Span::styled("[↑↓]", key_style),
                 Span::raw(" Navigate   "),
+                Span::styled("[Space]", key_style),
+                Span::raw(" Toggle   "),
                 Span::styled("[Enter]", key_style),
-                Span::raw(" Choose   "),
+                Span::raw(" Add Selected   "),
                 Span::styled("[Esc]", key_style),
                 Span::raw(" Cancel"),
             ]),
@@ -2300,9 +2340,17 @@ impl App {
         let items: Vec<ListItem> = state
             .items
             .iter()
-            .map(|item| match item {
+            .enumerate()
+            .map(|(index, item)| match item {
                 AddSongItem::CreateNew => ListItem::new("Create a new song"),
-                AddSongItem::Existing(song) => ListItem::new(song.display_title()),
+                AddSongItem::Existing(song) => {
+                    let checkbox = if state.is_checked(index) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    ListItem::new(format!("{checkbox} {}", song.display_title()))
+                }
             })
             .collect();
 
@@ -3536,6 +3584,7 @@ struct AddSongState {
     binder_id: i64,
     items: Vec<AddSongItem>,
     selected: usize,
+    checked: HashSet<i64>,
 }
 
 /// Entries shown in the song picker list.
@@ -3554,6 +3603,7 @@ impl AddSongState {
             binder_id,
             items,
             selected: 0,
+            checked: HashSet::new(),
         })
     }
 
@@ -3595,6 +3645,36 @@ impl AddSongState {
     /// Currently highlighted item, if the list is not empty.
     fn current_item(&self) -> Option<&AddSongItem> {
         self.items.get(self.selected)
+    }
+
+    /// Whether the entry at the supplied index is currently checked.
+    fn is_checked(&self, index: usize) -> bool {
+        matches!(
+            self.items.get(index),
+            Some(AddSongItem::Existing(song)) if self.checked.contains(&song.id)
+        )
+    }
+
+    /// Toggle the checkbox for the currently highlighted song, if applicable.
+    fn toggle_current_selection(&mut self) {
+        if let Some(AddSongItem::Existing(song)) = self.items.get(self.selected) {
+            if !self.checked.remove(&song.id) {
+                self.checked.insert(song.id);
+            }
+        }
+    }
+
+    /// Snapshot the checked songs as owned values for batch assignment.
+    fn checked_songs(&self) -> Vec<Song> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                AddSongItem::Existing(song) if self.checked.contains(&song.id) => {
+                    Some(song.clone())
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
 
