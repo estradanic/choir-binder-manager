@@ -1761,7 +1761,16 @@ impl App {
                     } else {
                         "[ ]"
                     };
-                    ListItem::new(format!("{checkbox} {}", song.display_title()))
+                    let mut spans = vec![Span::raw(format!("{checkbox} "))];
+                    if state.director_song_ids.contains(&song.id) {
+                        spans.push(Span::styled(
+                            "*",
+                            Style::default().fg(Color::Rgb(255, 165, 0)),
+                        ));
+                        spans.push(Span::raw(" "));
+                    }
+                    spans.push(Span::raw(song.display_title()));
+                    ListItem::new(Line::from(spans))
                 }
             })
             .collect();

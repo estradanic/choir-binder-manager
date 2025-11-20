@@ -1,7 +1,7 @@
-use std::cmp::min;
+use std::cmp::{min, Ordering};
 use std::collections::HashSet;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 use crate::db::fetch_available_songs;
@@ -373,16 +373,34 @@ impl ToPrintScreen {
 
     pub(crate) fn refresh_song_rows(&mut self) {
         let mut rows = Vec::new();
-        for entry in &self.song_totals {
-            if entry.needed > 0 {
-                let copies_label = if entry.needed == 1 { "copy" } else { "copies" };
-                rows.push(format!(
-                    "{}  ({} {})",
-                    entry.song.display_title(),
-                    entry.needed,
-                    copies_label
-                ));
+        let mut needs: Vec<&SongNeeded> = self
+            .song_totals
+            .iter()
+            .filter(|entry| entry.needed > 0)
+            .collect();
+        needs.sort_by(|a, b| {
+            let title_order = a
+                .song
+                .title
+                .to_lowercase()
+                .cmp(&b.song.title.to_lowercase());
+            if title_order != Ordering::Equal {
+                return title_order;
             }
+            a.song
+                .composer
+                .to_lowercase()
+                .cmp(&b.song.composer.to_lowercase())
+        });
+
+        for entry in needs {
+            let copies_label = if entry.needed == 1 { "copy" } else { "copies" };
+            rows.push(format!(
+                "{}  ({} {})",
+                entry.song.display_title(),
+                entry.needed,
+                copies_label
+            ));
         }
         if rows.is_empty() {
             rows.push("No songs need printing.".to_string());
@@ -585,6 +603,7 @@ pub(crate) struct AddSongState {
     pub(crate) items: Vec<AddSongItem>,
     pub(crate) selected: usize,
     pub(crate) checked: HashSet<i64>,
+    pub(crate) director_song_ids: HashSet<i64>,
 }
 
 /// Entries shown in the song picker list.
@@ -598,12 +617,14 @@ impl AddSongState {
     pub(crate) fn load(conn: &Connection, binder_id: i64) -> Result<Self> {
         let mut items = vec![AddSongItem::CreateNew];
         let available = fetch_available_songs(conn, binder_id)?;
+        let director_song_ids = Self::load_director_song_ids(conn)?;
         items.extend(available.into_iter().map(AddSongItem::Existing));
         Ok(Self {
             binder_id,
             items,
             selected: 0,
             checked: HashSet::new(),
+            director_song_ids,
         })
     }
 
@@ -667,5 +688,22 @@ impl AddSongState {
                 _ => None,
             })
             .collect()
+    }
+
+    fn load_director_song_ids(conn: &Connection) -> Result<HashSet<i64>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT bs.song_id
+                 FROM binder_songs bs
+                 INNER JOIN binders b ON b.id = bs.binder_id
+                 WHERE b.number = 0",
+            )
+            .context("failed to prepare director song lookup")?;
+        let ids = stmt
+            .query_map([], |row| row.get(0))
+            .context("failed to iterate director songs")?
+            .collect::<rusqlite::Result<Vec<i64>>>()
+            .context("failed to collect director song ids")?;
+        Ok(ids.into_iter().collect())
     }
 }
