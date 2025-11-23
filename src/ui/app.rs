@@ -492,6 +492,29 @@ impl App {
                     KeyCode::PageDown => report.move_selection(5),
                     KeyCode::Home => report.select_first(),
                     KeyCode::End => report.select_last(),
+                    KeyCode::Enter => {
+                        if matches!(report.mode, ToPrintMode::BySong) {
+                            if let Some(song) = report.current_song().cloned() {
+                                let link = song.link.trim().to_string();
+                                if link.is_empty() {
+                                    self.set_status(
+                                        "This song does not have a link.".to_string(),
+                                        StatusKind::Error,
+                                    );
+                                } else if let Err(err) = open_link(&link) {
+                                    self.set_status(
+                                        format!("Failed to open link: {err}"),
+                                        StatusKind::Error,
+                                    );
+                                } else {
+                                    self.set_status(
+                                        format!("Opened {}.", song.display_title()),
+                                        StatusKind::Info,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     KeyCode::Char(' ') => {
                         if let Some(checked) = report.toggle_current() {
                             if checked {
@@ -1254,14 +1277,56 @@ impl App {
             return;
         }
 
-        let lines = report.display_lines();
-        let content = if lines.is_empty() {
-            String::from("Nothing to print.")
-        } else {
-            lines.join("\n")
+        let lines: Vec<Line> = match report.mode {
+            ToPrintMode::ByBinder => {
+                let plain = report.display_lines();
+                if plain.is_empty() {
+                    vec![Line::from("Nothing to print.")]
+                } else {
+                    plain.into_iter().map(Line::from).collect()
+                }
+            }
+            ToPrintMode::BySong => {
+                if report.song_rows.is_empty() {
+                    vec![Line::from("Nothing to print.")]
+                } else {
+                    report
+                        .song_rows
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, row)| {
+                            let pointer = if idx == report.selected_index {
+                                "▶ "
+                            } else {
+                                "  "
+                            };
+                            let text = format!("{pointer}{}", row.text);
+                            let link_style = if idx == report.selected_index {
+                                row
+                                    .song
+                                    .as_ref()
+                                    .and_then(|song| {
+                                        let trimmed = song.link.trim();
+                                        if trimmed.is_empty() {
+                                            None
+                                        } else {
+                                            Some(Style::default().fg(Color::Cyan))
+                                        }
+                                    })
+                            } else {
+                                None
+                            };
+                            match link_style {
+                                Some(style) => Line::from(Span::styled(text, style)),
+                                None => Line::from(text),
+                            }
+                        })
+                        .collect()
+                }
+            }
         };
 
-        let paragraph = Paragraph::new(content)
+        let paragraph = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false })
             .scroll((report.scroll, 0));

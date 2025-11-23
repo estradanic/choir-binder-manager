@@ -134,7 +134,7 @@ pub(crate) struct ToPrintScreen {
     pub(crate) binder_reports: Vec<BinderReport>,
     pub(crate) binder_rows: Vec<BinderRow>,
     pub(crate) song_totals: Vec<SongNeeded>,
-    pub(crate) song_rows: Vec<String>,
+    pub(crate) song_rows: Vec<SongRow>,
     pub(crate) scroll: u16,
     pub(crate) selected_index: usize,
     pub(crate) pending_changes: usize,
@@ -271,13 +271,13 @@ impl ToPrintScreen {
                 .song_rows
                 .iter()
                 .enumerate()
-                .map(|(idx, text)| {
+                .map(|(idx, row)| {
                     let pointer = if idx == self.selected_index {
                         "▶ "
                     } else {
                         "  "
                     };
-                    format!("{pointer}{text}")
+                    format!("{pointer}{}", row.text)
                 })
                 .collect(),
         }
@@ -394,16 +394,10 @@ impl ToPrintScreen {
         });
 
         for entry in needs {
-            let copies_label = if entry.needed == 1 { "copy" } else { "copies" };
-            rows.push(format!(
-                "{}  ({} {})",
-                entry.song.display_title(),
-                entry.needed,
-                copies_label
-            ));
+            rows.push(SongRow::from_needed(entry));
         }
         if rows.is_empty() {
-            rows.push("No songs need printing.".to_string());
+            rows.push(SongRow::placeholder("No songs need printing."));
         }
         self.song_rows = rows;
         if matches!(self.mode, ToPrintMode::BySong) {
@@ -415,6 +409,15 @@ impl ToPrintScreen {
             }
             self.update_scroll();
         }
+    }
+
+    pub(crate) fn current_song(&self) -> Option<&Song> {
+        if !self.director_exists || !matches!(self.mode, ToPrintMode::BySong) {
+            return None;
+        }
+        self.song_rows
+            .get(self.selected_index)
+            .and_then(|row| row.song.as_ref())
     }
 
     pub(crate) fn refresh_binder_rows(&mut self) {
@@ -491,6 +494,34 @@ pub(crate) enum BinderRowKind {
 pub(crate) struct SongNeeded {
     pub(crate) song: Song,
     pub(crate) needed: usize,
+}
+
+/// Row rendered in the aggregated song view.
+pub(crate) struct SongRow {
+    pub(crate) text: String,
+    pub(crate) song: Option<Song>,
+}
+
+impl SongRow {
+    fn from_needed(entry: &SongNeeded) -> Self {
+        let copies_label = if entry.needed == 1 { "copy" } else { "copies" };
+        Self {
+            text: format!(
+                "{}  ({} {})",
+                entry.song.display_title(),
+                entry.needed,
+                copies_label
+            ),
+            song: Some(entry.song.clone()),
+        }
+    }
+
+    fn placeholder(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            song: None,
+        }
+    }
 }
 
 /// Backing state for the binder-specific song view.
